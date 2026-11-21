@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Live Results</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#fff}
+  #crop{position:absolute;overflow:hidden;background:#000}
+  #player{position:absolute;border:0}
+  #crop.locked #player{pointer-events:none}
+  #frame{position:absolute;border:3px solid #ff3b30;box-shadow:0 0 0 9999px rgba(0,0,0,.45);pointer-events:none;display:none;box-sizing:border-box}
+  #crop.full #frame{display:block}
+  #gear{position:fixed;right:12px;bottom:12px;z-index:20;width:44px;height:44px;border-radius:50%;border:0;background:rgba(255,255,255,.18);color:#fff;font-size:22px;opacity:.35}
+  #gear:active{opacity:1}
+  #panel{position:fixed;left:0;right:0;bottom:0;z-index:30;background:rgba(18,18,18,.95);padding:14px 16px 18px;display:none;max-height:70vh;overflow:auto}
+  #panel.open{display:block}
+  .row{display:flex;align-items:center;gap:10px;margin:8px 0}
+  .row span:first-child{width:62px;font-size:14px;opacity:.8}
+  .row input[type=range]{flex:1;height:32px}
+  .row output{width:52px;text-align:right;font-variant-numeric:tabular-nums;font-size:14px}
+  .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  .btns button{flex:1 1 auto;padding:10px 12px;border:0;border-radius:8px;background:#2c2c2e;color:#fff;font-size:15px}
+  .btns button.primary{background:#0a84ff}
+  #url{flex:1;padding:8px;border-radius:6px;border:1px solid #444;background:#111;color:#fff;font-size:14px}
+  #msg{position:fixed;inset:0;z-index:15;display:none;align-items:center;justify-content:center;text-align:center;padding:24px;font-size:18px;background:rgba(0,0,0,.75)}
+  #msg.show{display:flex}
+</style>
+</head>
+<body>
+
+<div id="crop" class="locked">
+  <div id="player"></div>
+  <div id="frame"></div>
+</div>
+
+<div id="msg"></div>
+<button id="gear" aria-label="Settings">⚙</button>
+
+<div id="panel">
+  <div class="row"><span>Stream</span><input id="url" placeholder="YouTube link"></div>
+  <div class="row"><span>Left</span><input type="range" id="x" min="0" max="100" step="0.5"><output id="xo"></output></div>
+  <div class="row"><span>Top</span><input type="range" id="y" min="0" max="100" step="0.5"><output id="yo"></output></div>
+  <div class="row"><span>Width</span><input type="range" id="w" min="3" max="100" step="0.5"><output id="wo"></output></div>
+  <div class="row"><span>Height</span><input type="range" id="h" min="3" max="100" step="0.5"><output id="ho"></output></div>
+  <div class="row"><span>Preview</span><label><input type="checkbox" id="full" checked> Show full video with crop box</label></div>
+  <div class="btns">
+    <button id="live">Jump to live</button>
+    <button id="fs">Fullscreen</button>
+    <button id="reset">Reset crop</button>
+    <button id="done" class="primary">Done</button>
+  </div>
+</div>
+
+<script>
+const DEFAULT_ID = '_yuqugO6Pgg';
+const DEFAULT_CROP = { x: 0, y: 0, w: 30, h: 70 };   // percent of the video frame
+const KEY = 'race-results-crop-v1';
+
+const $ = id => document.getElementById(id);
+const crop = $('crop'), frame = $('frame'), panel = $('panel'), msg = $('msg');
+
+function parseId(s) {
+  s = (s || '').trim();
+  const m = s.match(/(?:v=|youtu\.be\/|\/live\/|\/embed\/|\/shorts\/)([\w-]{11})/);
+  if (m) return m[1];
+  return /^[\w-]{11}$/.test(s) ? s : null;
+}
+
+function loadCfg() {
+  let cfg = { id: DEFAULT_ID, ...DEFAULT_CROP }, saved = false;
+  try {
+    const s = JSON.parse(localStorage.getItem(KEY) || 'null');
+    if (s) { cfg = { ...cfg, ...s }; saved = true; }
+  } catch (e) {}
+  try {
+    const h = new URLSearchParams(location.hash.slice(1));
+    ['x', 'y', 'w', 'h'].forEach(k => { if (h.has(k)) { cfg[k] = +h.get(k); saved = true; } });
+    if (h.has('id')) cfg.id = h.get('id');
+  } catch (e) {}
+  return { cfg, saved };
+}
+let { cfg, saved } = loadCfg();
+
+function saveCfg() {
+  try { localStorage.setItem(KEY, JSON.stringify(cfg)); } catch (e) {}
+  try { history.replaceState(null, '', `#id=${cfg.id}&x=${cfg.x}&y=${cfg.y}&w=${cfg.w}&h=${cfg.h}`); } catch (e) {}
+}
+
+let showFull = false;
+
+function layout() {
+  const ifr = $('player');
+  const SW = innerWidth, SH = innerHeight;
+  const x = cfg.x / 100, y = cfg.y / 100, w = cfg.w / 100, h = cfg.h / 100;
+  const cw = showFull ? 1 : w, ch = showFull ? 1 : h;
+  // size the player so the cropped region fills the screen (bigger player = YouTube serves higher quality)
+  const Vw = Math.min(SW / cw, SH / (ch * 9 / 16));
+  const Vh = Vw * 9 / 16;
+  const bw = cw * Vw, bh = ch * Vh;
+  Object.assign(crop.style, { left: (SW - bw) / 2 + 'px', top: (SH - bh) / 2 + 'px', width: bw + 'px', height: bh + 'px' });
+  Object.assign(ifr.style, {
+    width: Vw + 'px', height: Vh + 'px',
+    left: (showFull ? 0 : -x * Vw) + 'px', top: (showFull ? 0 : -y * Vh) + 'px'
+  });
+  ifr.width = Math.round(Vw); ifr.height = Math.round(Vh);
+  Object.assign(frame.style, { left: x * Vw + 'px', top: y * Vh + 'px', width: w * Vw + 'px', height: h * Vh + 'px' });
+  crop.classList.toggle('full', showFull);
+}
+
+function syncSliders() {
+  ['x', 'y', 'w', 'h'].forEach(k => { $(k).value = cfg[k]; $(k + 'o').value = cfg[k] + '%'; });
+  $('url').value = 'https://youtu.be/' + cfg.id;
+}
+
+function openPanel() { panel.classList.add('open'); showFull = $('full').checked; syncSliders(); layout(); }
+function closePanel() { panel.classList.remove('open'); showFull = false; saveCfg(); layout(); requestWake(); }
+
+['x', 'y', 'w', 'h'].forEach(k => $(k).addEventListener('input', e => {
+  cfg[k] = +e.target.value;
+  if (cfg.x + cfg.w > 100) cfg.w = Math.max(3, 100 - cfg.x);
+  if (cfg.y + cfg.h > 100) cfg.h = Math.max(3, 100 - cfg.y);
+  syncSliders(); layout(); saveCfg();
+}));
+$('full').addEventListener('change', e => { showFull = e.target.checked; layout(); });
+$('url').addEventListener('change', e => {
+  const id = parseId(e.target.value);
+  if (id && id !== cfg.id) { cfg.id = id; saveCfg(); if (player) player.loadVideoById(id); }
+});
+$('gear').onclick = () => panel.classList.contains('open') ? closePanel() : openPanel();
+$('done').onclick = closePanel;
+$('reset').onclick = () => { Object.assign(cfg, DEFAULT_CROP); syncSliders(); layout(); saveCfg(); };
+$('live').onclick = () => { try { player.seekTo(player.getDuration(), true); player.playVideo(); } catch (e) {} };
+$('fs').onclick = () => {
+  const d = document.documentElement;
+  (d.requestFullscreen || d.webkitRequestFullscreen || function(){}).call(d);
+};
+addEventListener('resize', layout);
+addEventListener('orientationchange', () => setTimeout(layout, 300));
+
+// keep the screen awake while the page is visible
+let wake = null;
+async function requestWake() {
+  try { if ('wakeLock' in navigator && !wake) { wake = await navigator.wakeLock.request('screen'); wake.addEventListener('release', () => wake = null); } } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { requestWake(); try { player.playVideo(); } catch (e) {} } });
+
+function showMsg(text, tapToStart) {
+  msg.innerHTML = text; msg.classList.add('show');
+  msg.onclick = tapToStart ? () => { msg.classList.remove('show'); try { player.playVideo(); } catch (e) {} requestWake(); } : null;
+}
+
+// YouTube player
+let player = null, state = -1, notPlayingSince = Date.now();
+const tag = document.createElement('script');
+tag.src = 'https://www.youtube.com/iframe_api';
+document.head.appendChild(tag);
+
+window.onYouTubeIframeAPIReady = () => {
+  player = new YT.Player('player', {
+    videoId: cfg.id,
+    width: 1280, height: 720,
+    playerVars: { autoplay: 1, mute: 1, controls: 0, playsinline: 1, rel: 0, disablekb: 1, fs: 0, iv_load_policy: 3, modestbranding: 1 },
+    events: {
+      onReady: e => { e.target.mute(); e.target.playVideo(); layout(); if (!saved) openPanel(); },
+      onStateChange: e => {
+        state = e.data;
+        if (state === 1) { notPlayingSince = 0; msg.classList.remove('show'); }
+        else if (!notPlayingSince) notPlayingSince = Date.now();
+        if (state === 2) setTimeout(() => { try { player.playVideo(); } catch (_) {} }, 1500);
+      },
+      onError: e => {
+        const c = e.data;
+        if (c === 101 || c === 150) showMsg('The stream owner has blocked embedding for this video, so it can\'t be cropped in a page.<br><br>Error ' + c);
+        else if (c === 153) showMsg('YouTube refused to play this page from a local file.<br>Open it from a web address instead (see the notes from Claude).<br><br>Error 153');
+        else showMsg('Player error ' + c + '. Retrying…');
+        if (c !== 101 && c !== 150 && c !== 153) setTimeout(() => player.loadVideoById(cfg.id), 10000);
+      }
+    }
+  });
+};
+
+// watchdog: keep it playing, recover from stalls
+setInterval(() => {
+  if (!player || !player.getPlayerState) return;
+  if (state === 1) return;
+  const idle = notPlayingSince ? Date.now() - notPlayingSince : 0;
+  if (idle > 6000 && !msg.classList.contains('show') && !panel.classList.contains('open')) showMsg('Tap to start the live results', true);
+  if (idle > 15000) { try { player.playVideo(); } catch (e) {} }
+  if (idle > 90000) { try { player.loadVideoById(cfg.id); notPlayingSince = Date.now(); } catch (e) {} }
+}, 5000);
+
+layout();
+</script>
+</body>
+</html>
